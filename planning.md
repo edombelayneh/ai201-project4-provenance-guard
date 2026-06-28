@@ -52,13 +52,23 @@ its **output** is. Every signal returns a single **score from 0 to 1** (0 = look
 
 ### How we combine them into one score
 
-1. **Weighted average.** Perplexity is the strongest, so it counts most:
+0. **Drop abstentions.** A signal that had nothing to measure (too few sentences, no
+   punctuation evidence, a Groq error) returns `available: false` and is **excluded** from
+   fusion. A "no information" signal never votes — otherwise its neutral 0.5 would act like a
+   real vote and create fake disagreement.
+1. **Weighted average** of the signals that *did* vote (weights renormalized over them).
+   Perplexity is the strongest, so it counts most:
    `M = 0.40·perplexity + 0.20·burstiness + 0.20·lexical + 0.20·punctuation`.
-2. **Punish disagreement.** Take the spread `= max(score) − min(score)` and pull the result
-   toward the middle when signals disagree:
-   `P_ai = 0.5 + (M − 0.5) · (1 − spread)`.
-   - If all four agree (spread ≈ 0) → `P_ai = M`.
-   - If they fully disagree (spread ≈ 1) → `P_ai ≈ 0.5` (uncertain).
+2. **Punish disagreement.** Measure disagreement as the **standard deviation** of the voting
+   scores, normalized by its maximum (0.5), then pull the result toward the middle:
+   `disagreement = min(1, stdev(scores) / 0.5)`
+   `P_ai = 0.5 + (M − 0.5) · (1 − disagreement)`.
+   - If all signals agree (disagreement ≈ 0) → `P_ai = M`.
+   - If they fully split 2-vs-2 (disagreement ≈ 1) → `P_ai ≈ 0.5` (uncertain).
+
+   We use standard deviation instead of `max − min` because the range is dominated by a
+   single outlier: one noisy signal could veto three agreeing ones. Std deviation reflects how
+   the *whole panel* disagrees, so a lone dissenter dents confidence without erasing it.
 
 `P_ai` (0–1) is our final **AI-likelihood** and the number we return as `confidence`.
 

@@ -1,9 +1,9 @@
 """
 Provenance Guard — Flask app.
 
-M3: POST /submit route stub + Signal 1 (perplexity via Groq).
-Fusion/labels (M4) and appeals/audit log (M5) are wired in later — the
-response shape below is intentionally partial and marked accordingly.
+M4: POST /submit runs all four signals, fuses them into a single confidence
+score, and records the full decision in the audit log. Transparency labels and
+the appeals workflow (M5) come next, so `label` is still null.
 """
 
 import uuid
@@ -12,7 +12,14 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
-from signals import perplexity_score
+import audit
+from scoring import fuse
+from signals import (
+    burstiness_score,
+    lexical_score,
+    perplexity_score,
+    punctuation_score,
+)
 
 load_dotenv()
 
@@ -24,7 +31,8 @@ MAX_CHARS = 10_000
 
 
 def _now_iso():
-    return datetime.now(timezone.utc).isoformat()
+    # e.g. "2026-06-28T21:32:10.123Z"
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 @app.get("/health")
@@ -35,10 +43,8 @@ def health():
 @app.post("/submit")
 def submit():
     """
-    Accept text for attribution analysis.
-
-    M3 scope: validate input and run Signal 1. `result`, `confidence`, and
-    `label` are placeholders until the scorer (M4) and labels (M5) land.
+    Accept text for attribution analysis, classify it, and record the decision
+    in the audit log.
     """
     data = request.get_json(silent=True) or {}
     text = data.get("text")
@@ -53,25 +59,64 @@ def submit():
     if len(text) > MAX_CHARS:
         return jsonify({"error": f"Text too long (max {MAX_CHARS} characters)."}), 400
 
-    # --- Detection pipeline (M3: one signal) ---
+    # --- Detection pipeline: all four signals ---
     signals = {
         "perplexity": perplexity_score(text),
-        # "burstiness":  ...   # added in M4
-        # "lexical":     ...   # added in M4
-        # "punctuation": ...   # added in M4
+        "burstiness": burstiness_score(text),
+        "lexical": lexical_score(text),
+        "punctuation": punctuation_score(text),
     }
 
-    return jsonify({
-        "content_id": str(uuid.uuid4()),
+    # --- Fuse into a single verdict (weighted mean + disagreement penalty) ---
+    # Pass full signal dicts so fuse() can drop abstentions (available=False).
+    verdict = fuse(signals)
+    signal_scores = {name: sig["score"] for name, sig in signals.items()}
+
+    content_id = str(uuid.uuid4())
+    timestamp = _now_iso()
+
+    # --- Audit log: structured entry for every decision ---
+    audit.log_decision({
+        "content_id": content_id,
         "creator_id": creator_id,
-        "result": None,        # M4: derived from fused score
-        "confidence": None,    # M4: P_ai
-        "label": None,         # M5: transparency label text
-        "signals": signals,
+        "timestamp": timestamp,
+        "attribution": verdict["attribution"],
+        "confidence": verdict["confidence"],       # fused P_ai
+        "llm_score": signal_scores["perplexity"],  # raw Groq signal (kept separate)
+        "signal_scores": signal_scores,
+        "signals_used": verdict["signals_used"],
+        "weighted_mean": verdict["weighted_mean"],
+        "disagreement": verdict["disagreement"],
         "status": "classified",
-        "timestamp": _now_iso(),
-        "_note": "M3 stub — only Signal 1 (perplexity) is active so far.",
     })
+
+    return jsonify({
+        "content_id": content_id,
+        "creator_id": creator_id,
+        "attribution": verdict["attribution"],
+        "confidence": verdict["confidence"],
+        "label": None,                # M5: transparency label text
+        "signals": signals,
+        "scoring": {
+            "weighted_mean": verdict["weighted_mean"],
+            "disagreement": verdict["disagreement"],
+            "signals_used": verdict["signals_used"],
+        },
+        "status": "classified",
+        "timestamp": timestamp,
+    })
+
+
+@app.get("/log")
+def get_log():
+    """
+    Return audit log entries as JSON for documentation/grading visibility.
+    Optional filters: ?content_id=... and ?limit=... (defaults to last 50).
+    NOTE: in a real system this endpoint would require auth.
+    """
+    content_id = request.args.get("content_id")
+    limit = request.args.get("limit", default=50, type=int)
+    return jsonify({"entries": audit.read_log(content_id=content_id, limit=limit)})
 
 
 if __name__ == "__main__":
