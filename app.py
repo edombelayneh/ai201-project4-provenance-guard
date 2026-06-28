@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 import audit
 import store
@@ -27,9 +29,29 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# Rate limiting (per client IP). Limits are generous for a real writer checking
+# their own work, but stop a script from flooding the endpoint — which also
+# protects the paid Groq API call each /submit makes. See README for rationale.
+SUBMIT_RATE_LIMIT = "10 per minute;100 per day"
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
+
 # Input guards (see planning.md §5 — min-length guard avoids judging tiny texts).
 MIN_CHARS = 40
 MAX_CHARS = 10_000
+
+
+@app.errorhandler(429)
+def ratelimit_exceeded(e):
+    """Return a clean JSON 429 instead of Flask-Limiter's default HTML."""
+    return jsonify({
+        "error": "Rate limit exceeded. Please slow down and try again later.",
+        "limit": str(e.description),
+    }), 429
 
 
 def _now_iso():
@@ -43,6 +65,7 @@ def health():
 
 
 @app.post("/submit")
+@limiter.limit(SUBMIT_RATE_LIMIT)
 def submit():
     """
     Accept text for attribution analysis, classify it, and record the decision
@@ -82,6 +105,7 @@ def submit():
 
     # --- Audit log: structured entry for every decision ---
     audit.log_decision({
+        "event": "classification",
         "content_id": content_id,
         "creator_id": creator_id,
         "timestamp": timestamp,
@@ -93,6 +117,19 @@ def submit():
         "signals_used": verdict["signals_used"],
         "weighted_mean": verdict["weighted_mean"],
         "disagreement": verdict["disagreement"],
+        "status": "classified",
+    })
+
+    # --- Content store: current state, so appeals can update the status later ---
+    store.save_content({
+        "content_id": content_id,
+        "creator_id": creator_id,
+        "timestamp": timestamp,
+        "text": text,                              # kept so a reviewer can read it
+        "attribution": verdict["attribution"],
+        "confidence": verdict["confidence"],
+        "label": label,
+        "signal_scores": signal_scores,
         "status": "classified",
     })
 
@@ -113,6 +150,63 @@ def submit():
     })
 
 
+@app.post("/appeal")
+def appeal():
+    """
+    Let a creator contest a classification. Updates the content's status to
+    'under_review', logs the appeal alongside the original decision in the audit
+    log, and returns a confirmation. No automated re-classification.
+    """
+    data = request.get_json(silent=True) or {}
+    content_id = data.get("content_id")
+    creator_reasoning = data.get("creator_reasoning")
+
+    # --- Validation ---
+    if not isinstance(content_id, str) or not content_id.strip():
+        return jsonify({"error": "Field 'content_id' is required."}), 400
+    if not isinstance(creator_reasoning, str) or not creator_reasoning.strip():
+        return jsonify({"error": "Field 'creator_reasoning' is required."}), 400
+
+    record = store.get_content(content_id)
+    if record is None:
+        return jsonify({"error": f"Unknown content_id: {content_id}"}), 404
+
+    appeal_id = str(uuid.uuid4())
+    timestamp = _now_iso()
+    reasoning = creator_reasoning.strip()
+
+    # --- Update current state: status -> under_review ---
+    store.update_content(
+        content_id,
+        status="under_review",
+        appeal_id=appeal_id,
+        appeal_reasoning=reasoning,
+        appealed_at=timestamp,
+    )
+
+    # --- Audit log: appeal event, alongside the original decision ---
+    audit.log_decision({
+        "event": "appeal",
+        "content_id": content_id,
+        "appeal_id": appeal_id,
+        "creator_id": record.get("creator_id"),
+        "timestamp": timestamp,
+        "status": "under_review",
+        "appeal_reasoning": reasoning,
+        # carry the original verdict so the appeal sits next to what it contests
+        "original_attribution": record.get("attribution"),
+        "original_confidence": record.get("confidence"),
+    })
+
+    return jsonify({
+        "content_id": content_id,
+        "appeal_id": appeal_id,
+        "status": "under_review",
+        "logged_at": timestamp,
+        "message": "Appeal received. This content is now under review.",
+    })
+
+
 @app.get("/log")
 def get_log():
     """
@@ -123,6 +217,21 @@ def get_log():
     content_id = request.args.get("content_id")
     limit = request.args.get("limit", default=50, type=int)
     return jsonify({"entries": audit.read_log(content_id=content_id, limit=limit)})
+
+
+@app.get("/review-queue")
+def review_queue():
+    """The human reviewer's view: all content currently awaiting review."""
+    return jsonify({"under_review": store.by_status("under_review")})
+
+
+@app.get("/content/<content_id>")
+def get_content(content_id):
+    """Check a single content record's current status."""
+    record = store.get_content(content_id)
+    if record is None:
+        return jsonify({"error": f"Unknown content_id: {content_id}"}), 404
+    return jsonify(record)
 
 
 if __name__ == "__main__":
