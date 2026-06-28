@@ -9,3 +9,4 @@ __pycache__/
 # Local data / logs
 *.log
 audit_log.jsonl
+content_store.json

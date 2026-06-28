@@ -1,9 +1,9 @@
 """
 Provenance Guard — Flask app.
 
-M4: POST /submit runs all four signals, fuses them into a single confidence
-score, and records the full decision in the audit log. Transparency labels and
-the appeals workflow (M5) come next, so `label` is still null.
+M5: POST /submit runs all four signals, fuses them into a confidence score,
+attaches a plain-English transparency label, and records the decision in the
+audit log. (POST /appeal is added next.)
 """
 
 import uuid
@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
 import audit
+import store
+from labels import make_label
 from scoring import fuse
 from signals import (
     burstiness_score,
@@ -72,6 +74,9 @@ def submit():
     verdict = fuse(signals)
     signal_scores = {name: sig["score"] for name, sig in signals.items()}
 
+    # --- Transparency label (one of three variants, score-dependent) ---
+    label = make_label(verdict["attribution"], verdict["confidence"])
+
     content_id = str(uuid.uuid4())
     timestamp = _now_iso()
 
@@ -82,6 +87,7 @@ def submit():
         "timestamp": timestamp,
         "attribution": verdict["attribution"],
         "confidence": verdict["confidence"],       # fused P_ai
+        "label": label,                            # transparency label shown to reader
         "llm_score": signal_scores["perplexity"],  # raw Groq signal (kept separate)
         "signal_scores": signal_scores,
         "signals_used": verdict["signals_used"],
@@ -95,7 +101,7 @@ def submit():
         "creator_id": creator_id,
         "attribution": verdict["attribution"],
         "confidence": verdict["confidence"],
-        "label": None,                # M5: transparency label text
+        "label": label,
         "signals": signals,
         "scoring": {
             "weighted_mean": verdict["weighted_mean"],
