@@ -31,6 +31,15 @@ HUMAN_THRESHOLD = 0.30
 # and 1s). Dividing by it scales "disagreement" into [0, 1].
 _MAX_STD = 0.5
 
+# This is a multi-signal system: a verdict needs corroboration. If fewer than
+# this many signals vote, we can't be confident.
+_MIN_SIGNALS = 2
+
+# A lone signal can't be corroborated, so we treat it as highly uncertain. At
+# 0.65 the resulting P_ai always stays inside the "uncertain" band (0.3-0.7),
+# even for an extreme single score.
+_LONE_SIGNAL_DISAGREEMENT = 0.65
+
 
 def _clamp01(x):
     return max(0.0, min(1.0, float(x)))
@@ -86,15 +95,21 @@ def fuse(signals):
     total_w = sum(WEIGHTS[k] for k in present)
     weighted_mean = sum(WEIGHTS[k] * present[k] for k in present) / total_w
 
-    # B. Disagreement penalty: normalized std, pull toward 0.5.
+    # B. Disagreement penalty: normalized std, pull toward 0.5. A lone signal
+    #    can't be corroborated, so we treat it as inherently uncertain.
     values = list(present.values())
-    disagreement = min(1.0, statistics.pstdev(values) / _MAX_STD) if len(values) >= 2 else 0.0
+    if len(values) < _MIN_SIGNALS:
+        disagreement = _LONE_SIGNAL_DISAGREEMENT
+    else:
+        disagreement = min(1.0, statistics.pstdev(values) / _MAX_STD)
     p_ai = _clamp01(0.5 + (weighted_mean - 0.5) * (1 - disagreement))
 
-    # C. Threshold into a verdict.
+    # C. Threshold into a verdict. Round FIRST, then derive the label from the
+    #    rounded number so the displayed confidence and the label never disagree.
+    confidence = round(p_ai, 3)
     return {
-        "confidence": round(p_ai, 3),
-        "attribution": attribution_for(p_ai),
+        "confidence": confidence,
+        "attribution": attribution_for(confidence),
         "weighted_mean": round(weighted_mean, 3),
         "disagreement": round(disagreement, 3),
         "signals_used": sorted(present),

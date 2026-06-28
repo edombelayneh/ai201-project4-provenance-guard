@@ -181,44 +181,53 @@ def lexical_score(text):
 
 def punctuation_score(text):
     """
-    Signal 4 — punctuation patterns.
+    Signal 4 — punctuation patterns (an AI-tell DETECTOR).
 
-    AI punctuates neatly and evenly. We blend three sub-signals:
-      - em-dash density (AI overuses them),
-      - "rule of three" list constructions, and
-      - comma rhythm regularity (low variance between commas = machine-even).
-    Returns {"score": float in [0,1], "note": str}. Neutral 0.5 if there's
-    nothing punctuation-y to measure.
+    Looks for punctuation habits AI overuses: frequent em-dashes, "rule of
+    three" lists, and machine-regular comma spacing. Each tell counts only when
+    it is actually present — absence of a tell is treated as *no evidence*, not
+    as evidence of a human. So this signal only ever argues "AI-ish" or
+    abstains; it never votes "human" just because punctuation looks plain.
+
+    Returns {"score": float in [0,1], "note": str, "available": bool}. Abstains
+    (available=False) when no AI tells are found.
     """
     words = re.findall(r"\b\w+\b", text)
     if not words:
         return {"score": 0.5, "note": "punctuation n/a — no words", "available": False}
 
-    components = []
+    tells = []
 
-    # 1. Em-dash density: ~2 per 100 words saturates.
+    # Tell 1: em-dash density (~2 per 100 words saturates). Counts only if present.
     em_dashes = len(_EM_DASH.findall(text))
-    em_per_100 = em_dashes / len(words) * 100
-    components.append(_clamp01(em_per_100 / 2.0))
+    if em_dashes:
+        tells.append(_clamp01(em_dashes / len(words) * 100 / 2.0))
 
-    # 2. Rule-of-three list constructions: ~2 saturates.
+    # Tell 2: rule-of-three list constructions (~2 saturates). Counts only if present.
     triples = len(_RULE_OF_THREE.findall(text))
-    components.append(_clamp01(triples / 2.0))
+    if triples:
+        tells.append(_clamp01(triples / 2.0))
 
-    # 3. Comma rhythm: low variation in words-between-commas = AI-even.
+    # Tell 3: machine-regular comma spacing. Counts ONLY when notably regular —
+    # irregular commas are normal human writing, i.e. absence of an AI tell.
+    regular = False
     comma_positions = [i for i, w in enumerate(text.split()) if w.endswith(",")]
     if len(comma_positions) >= 3:
         gaps = [b - a for a, b in zip(comma_positions, comma_positions[1:])]
         if statistics.mean(gaps) > 0:
-            cv = statistics.pstdev(gaps) / statistics.mean(gaps)
-            components.append(_clamp01(1 - cv / 0.8))
+            regularity = _clamp01(1 - statistics.pstdev(gaps) / statistics.mean(gaps) / 0.8)
+            if regularity > 0.5:
+                tells.append(regularity)
+                regular = True
 
-    if not any([em_dashes, triples, len(comma_positions) >= 3]):
-        return {"score": 0.5, "note": "punctuation n/a — no strong signal",
+    if not tells:
+        return {"score": 0.5, "note": "punctuation n/a — no AI tells found",
                 "available": False}
 
-    score = sum(components) / len(components)
+    score = sum(tells) / len(tells)
     note = f"{em_dashes} em-dash, {triples} rule-of-three list(s)"
+    if regular:
+        note += ", regular comma rhythm"
     return {"score": score, "note": note, "available": True}
 
 

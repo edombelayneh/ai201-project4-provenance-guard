@@ -44,11 +44,15 @@ its **output** is. Every signal returns a single **score from 0 to 1** (0 = look
 
 ### Signal 4 — Punctuation
 
-- **Looks at:** how punctuation is used — em-dashes, comma rhythm, neat balanced lists.
+- **Looks at:** AI punctuation tells — frequent em-dashes, "rule of three" lists, and
+  machine-regular comma spacing.
 - **Why they differ:** AI punctuates very neatly and evenly. Humans are messier.
-- **How we get it:** measure em-dash rate and how even the comma/list pattern is.
-- **Gets fooled by:** carefully edited human writing (also neat); AI told to "write casually."
-- **Output:** `0–1` score.
+- **How we get it:** an **AI-tell detector** — it only adds evidence for tells it actually
+  finds. Absence of a tell is treated as *no evidence*, NOT as evidence of a human, so the
+  signal only ever argues "AI-ish" or **abstains** (`available: false`); it never votes
+  "human" just because punctuation looks plain.
+- **Gets fooled by:** carefully edited human writing that happens to use these tells.
+- **Output:** `0–1` score, or abstains when no tells are found.
 
 ### How we combine them into one score
 
@@ -98,7 +102,8 @@ fusion:
 - **Burstiness:** `score = clamp(1 − CV/0.6, 0, 1)` (CV = coefficient of variation). Human
   prose averages CV ≈ 0.5; AI ≈ 0.2.
 - **Lexical:** `score = min(1, hits_per_100_words / 3)` (3+ tells per 100 words = full AI).
-- **Punctuation:** combine em-dash rate and list-evenness into 0–1.
+- **Punctuation:** an AI-tell detector — averages the strength of whichever tells (em-dashes,
+  rule-of-three lists, regular comma spacing) are present; abstains if none are found.
 
 **How we'll test the scores are meaningful (README).** Build a tiny labeled set — known
 human texts (classic poems, personal blog posts) and known AI texts (Groq/ChatGPT outputs).
