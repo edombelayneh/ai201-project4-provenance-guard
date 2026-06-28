@@ -107,6 +107,10 @@ _SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
 # CV at which a text is considered fully "human-bumpy" (planning.md §2: human ~0.5).
 _CV_HUMAN_ANCHOR = 0.6
 
+# Variance from a handful of sentences is noisy, so burstiness abstains below
+# this many sentences rather than voting on an unreliable estimate.
+_MIN_SENTENCES = 4
+
 
 def burstiness_score(text):
     """
@@ -116,14 +120,14 @@ def burstiness_score(text):
     uniform (low variance). We measure the coefficient of variation
     (CV = std / mean of sentence word-counts) and map low CV -> high AI score.
 
-    Returns {"score": float in [0,1], "note": str}. Needs >= 2 sentences;
-    otherwise degrades to a neutral 0.5.
+    Returns {"score": float in [0,1], "note": str}. Needs >= _MIN_SENTENCES
+    sentences for a stable estimate; otherwise it abstains.
     """
     sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
     lengths = [len(s.split()) for s in sentences if s.split()]
 
-    if len(lengths) < 2:
-        return {"score": 0.5, "note": "burstiness n/a — too few sentences",
+    if len(lengths) < _MIN_SENTENCES:
+        return {"score": 0.5, "note": f"burstiness n/a — only {len(lengths)} sentence(s)",
                 "available": False}
 
     mean = statistics.mean(lengths)
