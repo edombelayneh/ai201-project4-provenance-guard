@@ -1,0 +1,11 @@
+# Secrets — never commit the Groq API key
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local data / logs
+*.log
+audit_log.json
